@@ -19,8 +19,8 @@
 };
 
 &gpio {
-	/* don't reset gpio mux for serial console and reset gpio */
-	starfive,keep-gpiomux = <13 14 63>;
+	/* don't reset gpio mux for JTAG, serial console and reset gpio */
+	starfive,keep-gpiomux = <0 1 2 3 4 13 14 63>;
 };
 
 &i2c0 {
