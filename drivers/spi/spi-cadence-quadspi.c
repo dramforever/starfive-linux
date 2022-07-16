@@ -61,8 +61,11 @@ struct cqspi_flash_pdata {
 struct cqspi_st {
 	struct platform_device	*pdev;
 	struct spi_master	*master;
-	struct clk		*clk;
+	struct clk		*refclk;
 	unsigned int		sclk;
+
+	struct clk_bulk_data	*all_clks;
+	int			num_clks;
 
 	void __iomem		*iobase;
 	void __iomem		*ahb_base;
@@ -1546,6 +1549,17 @@ static int cqspi_setup_flash(struct cqspi_st *cqspi)
 	return 0;
 }
 
+static struct clk *cqspi_find_refclk(int num, const struct clk_bulk_data *clks)
+{
+	int i;
+
+	for (i = 0; i < num; i ++)
+		if (strcmp(clks[i].id, "refclk") == 0)
+			return clks[i].clk;
+
+	return NULL;
+}
+
 static int cqspi_probe(struct platform_device *pdev)
 {
 	const struct cqspi_driver_platdata *ddata;
@@ -1581,12 +1595,26 @@ static int cqspi_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	/* Obtain QSPI clock. */
-	cqspi->clk = devm_clk_get(dev, NULL);
-	if (IS_ERR(cqspi->clk)) {
-		dev_err(dev, "Cannot claim QSPI clock.\n");
-		ret = PTR_ERR(cqspi->clk);
-		return ret;
+	cqspi->num_clks = devm_clk_bulk_get_all(dev, &cqspi->all_clks);
+
+	if (cqspi->num_clks < 0) {
+		dev_err(dev, "Cannot claim clocks.\n");
+		ret = cqspi->num_clks;
+		goto probe_master_put;
+	} else if (cqspi->num_clks == 0) {
+		ret = -ENXIO;
+		dev_err(dev, "No clocks specified.\n");
+		goto probe_master_put;
+	} else if (cqspi->num_clks == 1) {
+		/* Only one clock, assume it's the reference clock */
+		cqspi->refclk = cqspi->all_clks[0].clk;
+	} else {
+		cqspi->refclk = cqspi_find_refclk(cqspi->num_clks,
+						  cqspi->all_clks);
+		if (cqspi->refclk == NULL) {
+			dev_err(dev, "No refclk specified.\n");
+			goto probe_master_put;
+		}
 	}
 
 	/* Obtain and remap controller address. */
@@ -1621,7 +1649,7 @@ static int cqspi_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
-	ret = clk_prepare_enable(cqspi->clk);
+	ret = clk_bulk_prepare_enable(cqspi->num_clks, cqspi->all_clks);
 	if (ret) {
 		dev_err(dev, "Cannot enable QSPI clock.\n");
 		goto probe_clk_failed;
@@ -1648,7 +1676,7 @@ static int cqspi_probe(struct platform_device *pdev)
 	reset_control_assert(rstc_ocp);
 	reset_control_deassert(rstc_ocp);
 
-	cqspi->master_ref_clk_hz = clk_get_rate(cqspi->clk);
+	cqspi->master_ref_clk_hz = clk_get_rate(cqspi->refclk);
 	master->max_speed_hz = cqspi->master_ref_clk_hz;
 
 	/* write completion is supported by default */
@@ -1709,7 +1737,7 @@ static int cqspi_probe(struct platform_device *pdev)
 probe_setup_failed:
 	cqspi_controller_enable(cqspi, 0);
 probe_reset_failed:
-	clk_disable_unprepare(cqspi->clk);
+	clk_bulk_disable_unprepare(cqspi->num_clks, cqspi->all_clks);
 probe_clk_failed:
 	pm_runtime_put_sync(dev);
 	pm_runtime_disable(dev);
@@ -1726,7 +1754,7 @@ static int cqspi_remove(struct platform_device *pdev)
 	if (cqspi->rx_chan)
 		dma_release_channel(cqspi->rx_chan);
 
-	clk_disable_unprepare(cqspi->clk);
+	clk_bulk_disable_unprepare(cqspi->num_clks, cqspi->all_clks);
 
 	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
